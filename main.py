@@ -1,6 +1,5 @@
-def main():
-    print("Hello from motiondata-lib!")
+from motion_browser import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
