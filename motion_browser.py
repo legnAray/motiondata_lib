@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime
-import shutil
+import re
 import sys
 import tempfile
 import time
@@ -36,35 +37,197 @@ from PySide6.QtWidgets import (
 
 
 DEFAULT_MODEL_PATH = Path("resources/unitree_g1/g1_29dof.urdf")
-REQUIRED_KEYS = {"framerate", "joint_names", "joint_pos", "base_pos_w", "base_quat_w"}
+STANDARD_NPZ_KEYS = {"framerate", "joint_names", "joint_pos", "base_pos_w", "base_quat_w"}
+SUPPORTED_DATASET_FORMATS = ("retargeted_npz", "sonic", "lafan1", "amass")
+SUPPORTED_MOTION_SUFFIXES = {".npz", ".csv", ".npy"}
 RIGHT_PANEL_WIDTH = 420
 ROOT_BODY_NAME = "pelvis"
+SONIC_DEFAULT_FPS = 120.0
+LAFAN1_DEFAULT_FPS = 30.0
+AMASS_BASE_Z_OFFSET = 0.75
+CANONICAL_JOINT_NAMES = (
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+)
+SONIC_ROOT_TRANSLATE_COLUMNS = ("root_translateX", "root_translateY", "root_translateZ")
+SONIC_ROOT_ROTATE_COLUMNS = ("root_rotateX", "root_rotateY", "root_rotateZ")
+SONIC_JOINT_COLUMNS = tuple(f"{name}_dof" for name in CANONICAL_JOINT_NAMES)
+SONIC_EXPECTED_COLUMNS = ("Frame", *SONIC_ROOT_TRANSLATE_COLUMNS, *SONIC_ROOT_ROTATE_COLUMNS, *SONIC_JOINT_COLUMNS)
 
 
 @dataclass(frozen=True)
 class MotionClipRef:
     path: Path
     display_name: str
+    format_name: str
 
 
 @dataclass(frozen=True)
 class MotionClip:
     path: Path
     display_name: str
+    format_name: str
     framerate: float
-    qpos_frames: np.ndarray
+    joint_names: np.ndarray
+    joint_pos: np.ndarray
+    base_pos_w: np.ndarray
+    base_quat_w: np.ndarray
 
     @property
     def frame_count(self) -> int:
-        return int(self.qpos_frames.shape[0])
+        return int(self.joint_pos.shape[0])
 
 
-def discover_motion_clips(dataset_dir: Path) -> list[MotionClipRef]:
+def _motion_files_under_dir(dataset_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in dataset_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_MOTION_SUFFIXES
+    )
+
+
+def _normalize_quaternions(quat_wxyz: np.ndarray) -> np.ndarray:
+    quat_wxyz = np.asarray(quat_wxyz, dtype=np.float64)
+    norms = np.linalg.norm(quat_wxyz, axis=1, keepdims=True)
+    return quat_wxyz / np.clip(norms, 1e-8, None)
+
+
+def _quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
+    quat_xyzw = np.asarray(quat_xyzw, dtype=np.float64)
+    return _normalize_quaternions(quat_xyzw[:, [3, 0, 1, 2]])
+
+
+def _quat_multiply(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    lw, lx, ly, lz = np.moveaxis(lhs, -1, 0)
+    rw, rx, ry, rz = np.moveaxis(rhs, -1, 0)
+    return np.stack(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ),
+        axis=-1,
+    )
+
+
+def _euler_xyz_degrees_to_quat_wxyz(euler_deg: np.ndarray) -> np.ndarray:
+    euler_rad = np.deg2rad(np.asarray(euler_deg, dtype=np.float64))
+    half_angles = 0.5 * euler_rad
+    sin_half = np.sin(half_angles)
+    cos_half = np.cos(half_angles)
+
+    qx = np.stack((cos_half[:, 0], sin_half[:, 0], np.zeros(len(euler_deg)), np.zeros(len(euler_deg))), axis=-1)
+    qy = np.stack((cos_half[:, 1], np.zeros(len(euler_deg)), sin_half[:, 1], np.zeros(len(euler_deg))), axis=-1)
+    qz = np.stack((cos_half[:, 2], np.zeros(len(euler_deg)), np.zeros(len(euler_deg)), sin_half[:, 2]), axis=-1)
+
+    quat_wxyz = _quat_multiply(qz, _quat_multiply(qy, qx))
+    return _normalize_quaternions(quat_wxyz)
+
+
+def _extract_amass_fps(path: Path) -> float:
+    matches = re.findall(r"(\d+)", path.stem)
+    if not matches:
+        raise ValueError(f"Could not infer AMASS frame rate from filename: {path.name}")
+    return float(matches[-1])
+
+
+def detect_motion_file_format(path: Path) -> str:
+    suffix = path.suffix.lower()
+
+    if suffix == ".npz":
+        with np.load(path, allow_pickle=False) as data:
+            if STANDARD_NPZ_KEYS.issubset(data.files):
+                return "retargeted_npz"
+        raise ValueError(f"Unsupported .npz layout in {path}")
+
+    if suffix == ".npy":
+        array = np.load(path, allow_pickle=False)
+        if array.ndim == 2 and array.shape[1] == 36:
+            return "amass"
+        raise ValueError(f"Unsupported .npy layout in {path}: expected shape (N, 36), got {array.shape}")
+
+    if suffix == ".csv":
+        with path.open(newline="") as handle:
+            first_line = handle.readline().strip()
+        if not first_line:
+            raise ValueError(f"CSV file is empty: {path}")
+
+        header = [value.strip() for value in first_line.split(",")]
+        if header and header[0] == "Frame":
+            if all(column in header for column in SONIC_EXPECTED_COLUMNS):
+                return "sonic"
+            raise ValueError(f"Unsupported Sonic CSV layout in {path}")
+
+        if len(header) == 36:
+            try:
+                [float(value) for value in header]
+            except ValueError as exc:
+                raise ValueError(f"Unsupported CSV layout in {path}") from exc
+            return "lafan1"
+
+        raise ValueError(f"Unsupported CSV layout in {path}")
+
+    raise ValueError(f"Unsupported motion file extension: {path.suffix}")
+
+
+def detect_dataset_format(dataset_dir: Path) -> str:
+    motion_files = _motion_files_under_dir(dataset_dir)
+    if not motion_files:
+        raise ValueError(f"No supported motion files were found under {dataset_dir}")
+
+    formats = {detect_motion_file_format(path) for path in motion_files}
+    if len(formats) != 1:
+        raise ValueError(f"Expected a single dataset format under {dataset_dir}, found: {sorted(formats)}")
+    return formats.pop()
+
+
+def discover_motion_clips(dataset_dir: Path, format_hint: str = "auto") -> list[MotionClipRef]:
     dataset_dir = dataset_dir.resolve()
+    if format_hint == "auto":
+        dataset_format = detect_dataset_format(dataset_dir)
+    else:
+        if format_hint not in SUPPORTED_DATASET_FORMATS:
+            raise ValueError(f"Unsupported dataset format '{format_hint}'")
+        dataset_format = format_hint
+
+    motion_files = _motion_files_under_dir(dataset_dir)
     clips = []
-    for path in sorted(dataset_dir.rglob("*.npz")):
+    for path in motion_files:
+        if detect_motion_file_format(path) != dataset_format:
+            continue
         relative = path.relative_to(dataset_dir).with_suffix("")
-        clips.append(MotionClipRef(path=path, display_name="/".join(relative.parts)))
+        clips.append(MotionClipRef(path=path, display_name="/".join(relative.parts), format_name=dataset_format))
+
+    if not clips:
+        raise ValueError(f"No {dataset_format} motion files were found under {dataset_dir}")
     return clips
 
 
@@ -163,56 +326,137 @@ def load_model(urdf_path: Path) -> mujoco.MjModel:
         runtime_urdf.unlink(missing_ok=True)
 
 
-def load_motion_clip(clip_ref: MotionClipRef, model: mujoco.MjModel) -> MotionClip:
-    with np.load(clip_ref.path, allow_pickle=False) as data:
-        missing = REQUIRED_KEYS.difference(data.files)
-        if missing:
-            missing_list = ", ".join(sorted(missing))
-            raise ValueError(f"{clip_ref.path} is missing required arrays: {missing_list}")
-
-        framerate = float(np.asarray(data["framerate"]).item())
-        joint_names = [str(name) for name in np.asarray(data["joint_names"]).tolist()]
-        joint_pos = np.asarray(data["joint_pos"], dtype=np.float64)
-        base_pos = np.asarray(data["base_pos_w"], dtype=np.float64)
-        base_quat = np.asarray(data["base_quat_w"], dtype=np.float64)
-
+def _validate_motion_clip_arrays(
+    path: Path,
+    joint_names: np.ndarray,
+    joint_pos: np.ndarray,
+    base_pos_w: np.ndarray,
+    base_quat_w: np.ndarray,
+) -> None:
     frame_count = joint_pos.shape[0]
     if frame_count == 0:
-        raise ValueError(f"{clip_ref.path} does not contain any frames")
-    if base_pos.shape != (frame_count, 3):
-        raise ValueError(f"{clip_ref.path} has base_pos_w shape {base_pos.shape}, expected ({frame_count}, 3)")
-    if base_quat.shape != (frame_count, 4):
-        raise ValueError(
-            f"{clip_ref.path} has base_quat_w shape {base_quat.shape}, expected ({frame_count}, 4)"
-        )
+        raise ValueError(f"{path} does not contain any frames")
+    if joint_pos.ndim != 2:
+        raise ValueError(f"{path} has joint_pos shape {joint_pos.shape}, expected a 2D array")
+    if base_pos_w.shape != (frame_count, 3):
+        raise ValueError(f"{path} has base_pos_w shape {base_pos_w.shape}, expected ({frame_count}, 3)")
+    if base_quat_w.shape != (frame_count, 4):
+        raise ValueError(f"{path} has base_quat_w shape {base_quat_w.shape}, expected ({frame_count}, 4)")
     if joint_pos.shape[1] != len(joint_names):
-        raise ValueError(
-            f"{clip_ref.path} has {joint_pos.shape[1]} joint columns but {len(joint_names)} joint names"
-        )
+        raise ValueError(f"{path} has {joint_pos.shape[1]} joint columns but {len(joint_names)} joint names")
 
-    qpos_frames = np.repeat(model.qpos0[np.newaxis, :], frame_count, axis=0)
-    qpos_frames[:, :3] = base_pos
 
-    quat_norms = np.linalg.norm(base_quat, axis=1, keepdims=True)
-    qpos_frames[:, 3:7] = base_quat / np.clip(quat_norms, 1e-8, None)
+def load_motion_clip(clip_ref: MotionClipRef, fps_override: float | None = None) -> MotionClip:
+    if clip_ref.format_name == "retargeted_npz":
+        with np.load(clip_ref.path, allow_pickle=False) as data:
+            missing = STANDARD_NPZ_KEYS.difference(data.files)
+            if missing:
+                missing_list = ", ".join(sorted(missing))
+                raise ValueError(f"{clip_ref.path} is missing required arrays: {missing_list}")
 
-    for column, joint_name in enumerate(joint_names):
-        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            framerate = float(np.asarray(data["framerate"]).item())
+            joint_names = np.asarray(data["joint_names"])
+            joint_pos = np.asarray(data["joint_pos"], dtype=np.float64)
+            base_pos_w = np.asarray(data["base_pos_w"], dtype=np.float64)
+            base_quat_w = np.asarray(data["base_quat_w"], dtype=np.float64)
+
+    elif clip_ref.format_name == "sonic":
+        with clip_ref.path.open(newline="") as handle:
+            reader = csv.reader(handle)
+            header = [value.strip() for value in next(reader)]
+
+        if tuple(header[: len(SONIC_EXPECTED_COLUMNS)]) != SONIC_EXPECTED_COLUMNS:
+            missing_columns = [column for column in SONIC_EXPECTED_COLUMNS if column not in header]
+            raise ValueError(f"{clip_ref.path} is missing expected Sonic columns: {missing_columns}")
+
+        column_indices = {name: index for index, name in enumerate(header)}
+        use_columns = [column_indices[name] for name in SONIC_EXPECTED_COLUMNS[1:]]
+        data = np.loadtxt(clip_ref.path, delimiter=",", skiprows=1, usecols=use_columns, dtype=np.float64)
+        data = np.atleast_2d(data)
+
+        joint_names = np.asarray(CANONICAL_JOINT_NAMES)
+        framerate = SONIC_DEFAULT_FPS
+        base_pos_w = data[:, 0:3] * 0.01
+        base_quat_w = _euler_xyz_degrees_to_quat_wxyz(data[:, 3:6])
+        joint_pos = np.deg2rad(data[:, 6:])
+
+    elif clip_ref.format_name == "lafan1":
+        data = np.loadtxt(clip_ref.path, delimiter=",", dtype=np.float64)
+        data = np.atleast_2d(data)
+        if data.shape[1] != 36:
+            raise ValueError(f"{clip_ref.path} has shape {data.shape}, expected (N, 36)")
+
+        joint_names = np.asarray(CANONICAL_JOINT_NAMES)
+        framerate = LAFAN1_DEFAULT_FPS
+        base_pos_w = data[:, 0:3]
+        base_quat_w = _quat_xyzw_to_wxyz(data[:, 3:7])
+        joint_pos = data[:, 7:]
+
+    elif clip_ref.format_name == "amass":
+        data = np.load(clip_ref.path, allow_pickle=False)
+        if data.ndim != 2 or data.shape[1] != 36:
+            raise ValueError(f"{clip_ref.path} has shape {data.shape}, expected (N, 36)")
+
+        joint_names = np.asarray(CANONICAL_JOINT_NAMES)
+        framerate = _extract_amass_fps(clip_ref.path)
+        base_pos_w = np.array(data[:, 0:3], copy=True)
+        base_pos_w[:, 2] += AMASS_BASE_Z_OFFSET
+        base_quat_w = _quat_xyzw_to_wxyz(data[:, 3:7])
+        joint_pos = data[:, 7:]
+
+    else:
+        raise ValueError(f"Unsupported dataset format '{clip_ref.format_name}'")
+
+    if fps_override is not None:
+        framerate = fps_override
+
+    joint_names = np.asarray(joint_names)
+    joint_pos = np.asarray(joint_pos, dtype=np.float64)
+    base_pos_w = np.asarray(base_pos_w, dtype=np.float64)
+    base_quat_w = _normalize_quaternions(np.asarray(base_quat_w, dtype=np.float64))
+    _validate_motion_clip_arrays(clip_ref.path, joint_names, joint_pos, base_pos_w, base_quat_w)
+
+    return MotionClip(
+        path=clip_ref.path,
+        display_name=clip_ref.display_name,
+        format_name=clip_ref.format_name,
+        framerate=framerate if framerate > 0 else 30.0,
+        joint_names=joint_names,
+        joint_pos=joint_pos,
+        base_pos_w=base_pos_w,
+        base_quat_w=base_quat_w,
+    )
+
+
+def build_qpos_frames(clip: MotionClip, model: mujoco.MjModel) -> np.ndarray:
+    qpos_frames = np.repeat(model.qpos0[np.newaxis, :], clip.frame_count, axis=0)
+    qpos_frames[:, :3] = clip.base_pos_w
+    qpos_frames[:, 3:7] = clip.base_quat_w
+
+    for column, joint_name in enumerate(clip.joint_names.tolist()):
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, str(joint_name))
         if joint_id == -1:
-            raise ValueError(f"Joint '{joint_name}' in {clip_ref.path} does not exist in the loaded model")
+            raise ValueError(f"Joint '{joint_name}' in {clip.path} does not exist in the loaded model")
 
         joint_type = model.jnt_type[joint_id]
         if joint_type not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
             raise ValueError(f"Joint '{joint_name}' uses unsupported MuJoCo joint type {joint_type}")
 
         qpos_address = model.jnt_qposadr[joint_id]
-        qpos_frames[:, qpos_address] = joint_pos[:, column]
+        qpos_frames[:, qpos_address] = clip.joint_pos[:, column]
 
-    return MotionClip(
-        path=clip_ref.path,
-        display_name=clip_ref.display_name,
-        framerate=framerate if framerate > 0 else 30.0,
-        qpos_frames=qpos_frames,
+    return qpos_frames
+
+
+def export_motion_clip_npz(clip: MotionClip, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        output_path,
+        framerate=np.asarray(clip.framerate, dtype=np.float32),
+        joint_names=np.asarray(clip.joint_names),
+        joint_pos=np.asarray(clip.joint_pos, dtype=np.float32),
+        base_pos_w=np.asarray(clip.base_pos_w, dtype=np.float32),
+        base_quat_w=np.asarray(clip.base_quat_w, dtype=np.float32),
     )
 
 
@@ -333,25 +577,35 @@ class MujocoViewer(QOpenGLWidget):
 
 
 class MotionBrowserWindow(QMainWindow):
-    def __init__(self, dataset_dir: Path, model_path: Path) -> None:
+    def __init__(
+        self,
+        dataset_dir: Path,
+        model_path: Path,
+        dataset_format: str = "auto",
+        fps_override: float | None = None,
+    ) -> None:
         super().__init__()
         self.dataset_dir = dataset_dir.resolve()
         self.model_path = model_path.resolve()
+        self.dataset_format = dataset_format
+        self.fps_override = fps_override
         self.model = load_model(self.model_path)
         self.viewer = MujocoViewer(self.model)
 
-        self.clips = discover_motion_clips(self.dataset_dir)
+        self.clips = discover_motion_clips(self.dataset_dir, format_hint=self.dataset_format)
         if not self.clips:
-            raise ValueError(f"No .npz files were found under {self.dataset_dir}")
+            raise ValueError(f"No motion files were found under {self.dataset_dir}")
+        self.detected_format = self.clips[0].format_name
 
         self.current_clip: MotionClip | None = None
+        self.current_qpos_frames: np.ndarray | None = None
         self.current_frame = 0.0
         self.scrubbing = False
         self.is_playing = True
         self._last_tick = time.perf_counter()
 
         self.list_widget = QListWidget()
-        self.clip_count_label = QLabel(f"{len(self.clips)} motion files")
+        self.clip_count_label = QLabel(f"{len(self.clips)} motion files ({self.detected_format})")
         self.checked_count_label = QLabel("0 checked")
         self.dataset_field = QLineEdit(str(self.dataset_dir))
         self.current_clip_field = QLineEdit("No clip loaded")
@@ -498,10 +752,10 @@ class MotionBrowserWindow(QMainWindow):
         try:
             export_dir = self._create_export_directory(destination_root)
             for clip_ref in checked_refs:
-                relative_path = clip_ref.path.relative_to(self.dataset_dir)
+                clip = load_motion_clip(clip_ref, fps_override=self.fps_override)
+                relative_path = clip_ref.path.relative_to(self.dataset_dir).with_suffix(".npz")
                 target_path = export_dir / relative_path
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(clip_ref.path, target_path)
+                export_motion_clip_npz(clip, target_path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Export failed", str(exc))
             return
@@ -513,8 +767,9 @@ class MotionBrowserWindow(QMainWindow):
         )
 
     def _load_clip(self, clip_ref: MotionClipRef) -> None:
-        clip = load_motion_clip(clip_ref, self.model)
+        clip = load_motion_clip(clip_ref, fps_override=self.fps_override)
         self.current_clip = clip
+        self.current_qpos_frames = build_qpos_frames(clip, self.model)
         self.current_frame = 0.0
         self._last_tick = time.perf_counter()
 
@@ -530,11 +785,11 @@ class MotionBrowserWindow(QMainWindow):
         self._render_current_frame(update_slider=False)
 
     def _render_current_frame(self, *, update_slider: bool = True) -> None:
-        if self.current_clip is None:
+        if self.current_clip is None or self.current_qpos_frames is None:
             return
 
         frame_index = min(int(self.current_frame), self.current_clip.frame_count - 1)
-        self.viewer.set_qpos(self.current_clip.qpos_frames[frame_index])
+        self.viewer.set_qpos(self.current_qpos_frames[frame_index])
         self.frame_label.setText(f"Frame {frame_index + 1} / {self.current_clip.frame_count}")
 
         if update_slider:
@@ -606,13 +861,24 @@ def configure_opengl() -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Browse retargeted G1 motion clips in a simple MuJoCo GUI.")
-    parser.add_argument("dataset", type=Path, help="Directory containing .npz motion clips")
+    parser = argparse.ArgumentParser(description="Browse motion clips in a simple MuJoCo GUI.")
+    parser.add_argument("dataset", type=Path, help="Directory containing motion clips in one supported format")
     parser.add_argument(
         "--model",
         type=Path,
         default=DEFAULT_MODEL_PATH,
         help=f"URDF model to load (default: {DEFAULT_MODEL_PATH})",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("auto", *SUPPORTED_DATASET_FORMATS),
+        default="auto",
+        help="Dataset format override. Defaults to auto-detect.",
+    )
+    parser.add_argument(
+        "--fps-override",
+        type=float,
+        help="Override the source frame rate for every clip in the input directory.",
     )
     return parser.parse_args(argv)
 
@@ -631,7 +897,12 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else ["motion-browser", *argv])
 
     try:
-        window = MotionBrowserWindow(dataset_dir, model_path)
+        window = MotionBrowserWindow(
+            dataset_dir,
+            model_path,
+            dataset_format=args.format,
+            fps_override=args.fps_override,
+        )
     except Exception as exc:  # noqa: BLE001
         QMessageBox.critical(None, "Failed to start motion browser", str(exc))
         return 1
