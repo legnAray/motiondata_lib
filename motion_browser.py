@@ -14,17 +14,18 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSlider,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
 
 DEFAULT_MODEL_PATH = Path("resources/unitree_g1/g1_29dof.urdf")
 REQUIRED_KEYS = {"framerate", "joint_names", "joint_pos", "base_pos_w", "base_quat_w"}
+RIGHT_PANEL_WIDTH = 420
 
 
 @dataclass(frozen=True)
@@ -93,10 +95,65 @@ def _prepare_runtime_urdf(urdf_path: Path) -> Path:
         return Path(handle.name)
 
 
+def _apply_default_viewer_scene(spec: mujoco.MjSpec) -> None:
+    spec.visual.headlight.active = 1
+    spec.visual.headlight.ambient = [0.25, 0.25, 0.25]
+    spec.visual.headlight.diffuse = [0.85, 0.85, 0.85]
+    spec.visual.headlight.specular = [0.20, 0.20, 0.20]
+
+    skybox = spec.add_texture()
+    skybox.name = "viewer_skybox"
+    skybox.type = mujoco.mjtTexture.mjTEXTURE_SKYBOX
+    skybox.builtin = mujoco.mjtBuiltin.mjBUILTIN_GRADIENT
+    skybox.rgb1 = [0.18, 0.35, 0.55]
+    skybox.rgb2 = [0.0, 0.0, 0.0]
+    skybox.width = 512
+    skybox.height = 3072
+
+    floor_texture = spec.add_texture()
+    floor_texture.name = "viewer_floor_texture"
+    floor_texture.type = mujoco.mjtTexture.mjTEXTURE_2D
+    floor_texture.builtin = mujoco.mjtBuiltin.mjBUILTIN_CHECKER
+    floor_texture.rgb1 = [0.10, 0.20, 0.34]
+    floor_texture.rgb2 = [0.18, 0.32, 0.52]
+    floor_texture.width = 512
+    floor_texture.height = 512
+
+    floor_material = spec.add_material()
+    floor_material.name = "viewer_floor_material"
+    floor_material.reflectance = 0.12
+    floor_material.shininess = 0.05
+    floor_material.specular = 0.15
+    floor_material.texrepeat = [6.0, 6.0]
+    floor_material.texuniform = True
+    floor_material.textures = [""] * int(mujoco.mjtTextureRole.mjNTEXROLE)
+    floor_material.textures[int(mujoco.mjtTextureRole.mjTEXROLE_RGB)] = floor_texture.name
+
+    ground = spec.worldbody.add_geom()
+    ground.name = "viewer_ground"
+    ground.type = mujoco.mjtGeom.mjGEOM_PLANE
+    ground.size = [10.0, 10.0, 0.1]
+    ground.material = floor_material.name
+    ground.pos = [0.0, 0.0, 0.0]
+    ground.conaffinity = 0
+    ground.contype = 0
+
+    light = spec.worldbody.add_light()
+    light.name = "viewer_key_light"
+    light.pos = [0.0, 0.0, 4.5]
+    light.dir = [0.0, 0.0, -1.0]
+    light.ambient = [0.15, 0.15, 0.15]
+    light.diffuse = [0.85, 0.85, 0.85]
+    light.specular = [0.20, 0.20, 0.20]
+    light.castshadow = True
+
+
 def load_model(urdf_path: Path) -> mujoco.MjModel:
     runtime_urdf = _prepare_runtime_urdf(urdf_path)
     try:
-        return mujoco.MjModel.from_xml_path(str(runtime_urdf))
+        spec = mujoco.MjSpec.from_file(str(runtime_urdf))
+        _apply_default_viewer_scene(spec)
+        return spec.compile()
     finally:
         runtime_urdf.unlink(missing_ok=True)
 
@@ -272,7 +329,8 @@ class MotionBrowserWindow(QMainWindow):
 
         self.list_widget = QListWidget()
         self.clip_count_label = QLabel(f"{len(self.clips)} motion files")
-        self.current_clip_label = QLabel("No clip loaded")
+        self.dataset_field = QLineEdit(str(self.dataset_dir))
+        self.current_clip_field = QLineEdit("No clip loaded")
         self.frame_label = QLabel("Frame 0 / 0")
 
         self.play_button = QPushButton("Pause")
@@ -304,15 +362,23 @@ class MotionBrowserWindow(QMainWindow):
         self.frame_slider.setPageStep(10)
         self.frame_slider.setTracking(True)
 
+        self.list_widget.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.list_widget.setTextElideMode(Qt.ElideNone)
+
+        self.dataset_field.setReadOnly(True)
+        self.dataset_field.setCursorPosition(0)
+        self.dataset_field.setToolTip(str(self.dataset_dir))
+
+        self.current_clip_field.setReadOnly(True)
+        self.current_clip_field.setCursorPosition(0)
+
         right_panel = QWidget()
+        right_panel.setFixedWidth(RIGHT_PANEL_WIDTH)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(12, 12, 12, 12)
         right_layout.setSpacing(10)
 
         title_label = QLabel("Dataset")
-        dataset_label = QLabel(str(self.dataset_dir))
-        dataset_label.setWordWrap(True)
-        dataset_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         controls_row = QHBoxLayout()
         controls_row.addWidget(self.play_button)
@@ -321,22 +387,21 @@ class MotionBrowserWindow(QMainWindow):
         controls_row.addWidget(self.speed_spin)
 
         right_layout.addWidget(title_label)
-        right_layout.addWidget(dataset_label)
+        right_layout.addWidget(self.dataset_field)
         right_layout.addWidget(self.clip_count_label)
         right_layout.addWidget(self.list_widget, stretch=1)
-        right_layout.addWidget(self.current_clip_label)
+        right_layout.addWidget(self.current_clip_field)
         right_layout.addLayout(controls_row)
         right_layout.addWidget(self.frame_slider)
         right_layout.addWidget(self.frame_label)
 
-        splitter = QSplitter()
-        splitter.addWidget(self.viewer)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1100, 320])
-
-        self.setCentralWidget(splitter)
+        central_widget = QWidget()
+        central_layout = QHBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.viewer, stretch=1)
+        central_layout.addWidget(right_panel)
+        self.setCentralWidget(central_widget)
 
     def _connect_signals(self) -> None:
         self.list_widget.currentItemChanged.connect(self._on_clip_selected)
@@ -363,9 +428,10 @@ class MotionBrowserWindow(QMainWindow):
         self.frame_slider.setValue(0)
         self.frame_slider.blockSignals(False)
 
-        self.current_clip_label.setText(
-            f"{clip.display_name} | {clip.frame_count} frames @ {clip.framerate:.2f} fps"
-        )
+        clip_summary = f"{clip.display_name} | {clip.frame_count} frames @ {clip.framerate:.2f} fps"
+        self.current_clip_field.setText(clip_summary)
+        self.current_clip_field.setCursorPosition(0)
+        self.current_clip_field.setToolTip(clip_summary)
         self._render_current_frame(update_slider=False)
 
     def _render_current_frame(self, *, update_slider: bool = True) -> None:
