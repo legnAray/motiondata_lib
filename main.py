@@ -1,4 +1,4 @@
-from motion_browser import main
+from motiondata_lib.app import main
 
 
 if __name__ == "__main__":
