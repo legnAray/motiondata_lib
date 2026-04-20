@@ -10,6 +10,7 @@
 - Auto-detect supported dataset formats when a directory contains only one format
 - Preview clips on a MuJoCo robot model with mouse camera control
 - Play, pause, scrub frames, adjust playback speed, and optionally follow the root body
+- Trim the current clip with timeline markers and export the selected span as `.npz`
 - Batch-export checked clips to the project's standardized `.npz` layout
 
 ## Requirements
@@ -49,6 +50,8 @@ sudo apt install libxcb-cursor0
 ```bash
 uv run python main.py <dataset_dir> [--robot unitree_g1] [--format auto]
 ```
+
+After launching, the GUI lets you select a clip, move the current frame, drag trim markers on the timeline, and export either checked clips or the trimmed span of the current clip.
 
 Command-line options:
 

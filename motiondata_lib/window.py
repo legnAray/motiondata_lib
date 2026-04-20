@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +29,7 @@ from motiondata_lib.exporters import export_motion_clip_npz
 from motiondata_lib.importers import discover_motion_clips, load_motion_clip
 from motiondata_lib.model import build_qpos_frames, load_model
 from motiondata_lib.robot_profiles import RobotProfile
+from motiondata_lib.trim_slider import TrimSlider
 from motiondata_lib.types import MotionClip, MotionClipRef
 from motiondata_lib.viewer import MujocoViewer
 
@@ -69,12 +69,14 @@ class MotionBrowserWindow(QMainWindow):
         self.dataset_field = QLineEdit(str(self.dataset_dir))
         self.current_clip_field = QLineEdit("No clip loaded")
         self.frame_label = QLabel("Frame 0 / 0")
+        self.trim_label = QLabel("Trim 0 - 0 (0 frames)")
 
         self.play_button = QPushButton("Pause")
         self.export_button = QPushButton("Export checked")
+        self.trim_button = QPushButton("Trim current")
         self.follow_root_checkbox = QCheckBox("Follow root")
         self.speed_spin = QDoubleSpinBox()
-        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider = TrimSlider()
 
         self._build_ui()
         self._connect_signals()
@@ -96,9 +98,7 @@ class MotionBrowserWindow(QMainWindow):
         self.speed_spin.setValue(1.0)
 
         self.frame_slider.setRange(0, 0)
-        self.frame_slider.setSingleStep(1)
-        self.frame_slider.setPageStep(10)
-        self.frame_slider.setTracking(True)
+        self.frame_slider.setTrimRange(0, 0)
 
         self.list_widget.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list_widget.setTextElideMode(Qt.ElideNone)
@@ -111,6 +111,7 @@ class MotionBrowserWindow(QMainWindow):
         self.current_clip_field.setCursorPosition(0)
 
         self.export_button.setEnabled(False)
+        self.trim_button.setEnabled(False)
 
         self.follow_root_checkbox.setChecked(True)
         self.follow_root_checkbox.setEnabled(self.viewer.root_body_id is not None)
@@ -139,9 +140,11 @@ class MotionBrowserWindow(QMainWindow):
         right_layout.addWidget(self.list_widget, stretch=1)
         right_layout.addWidget(self.current_clip_field)
         right_layout.addWidget(self.export_button)
+        right_layout.addWidget(self.trim_button)
         right_layout.addLayout(controls_row)
         right_layout.addWidget(self.frame_slider)
         right_layout.addWidget(self.frame_label)
+        right_layout.addWidget(self.trim_label)
 
         central_widget = QWidget()
         central_layout = QHBoxLayout(central_widget)
@@ -156,11 +159,13 @@ class MotionBrowserWindow(QMainWindow):
         self.list_widget.itemChanged.connect(self._on_item_changed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.export_button.clicked.connect(self._export_checked_clips)
+        self.trim_button.clicked.connect(self._trim_current_clip)
         self.follow_root_checkbox.toggled.connect(self.viewer.set_follow_root)
         self.speed_spin.valueChanged.connect(self._reset_tick_clock)
-        self.frame_slider.sliderPressed.connect(self._on_scrub_started)
-        self.frame_slider.sliderReleased.connect(self._on_scrub_finished)
+        self.frame_slider.sliderPressed.connect(self._on_slider_interaction_started)
+        self.frame_slider.sliderReleased.connect(self._on_slider_interaction_finished)
         self.frame_slider.valueChanged.connect(self._on_slider_changed)
+        self.frame_slider.trimChanged.connect(self._on_trim_changed)
 
     def _populate_clip_list(self) -> None:
         for clip_ref in self.clips:
@@ -229,16 +234,16 @@ class MotionBrowserWindow(QMainWindow):
         self.current_qpos_frames = build_qpos_frames(clip, self.model)
         self.current_frame = 0.0
         self._last_tick = time.perf_counter()
-
-        self.frame_slider.blockSignals(True)
+        self.trim_button.setEnabled(True)
         self.frame_slider.setRange(0, clip.frame_count - 1)
+        self.frame_slider.resetTrimRange()
         self.frame_slider.setValue(0)
-        self.frame_slider.blockSignals(False)
 
         clip_summary = f"{clip.display_name} | {clip.frame_count} frames @ {clip.framerate:.2f} fps"
         self.current_clip_field.setText(clip_summary)
         self.current_clip_field.setCursorPosition(0)
         self.current_clip_field.setToolTip(clip_summary)
+        self._update_trim_label()
         self._render_current_frame(update_slider=False)
 
     def _render_current_frame(self, *, update_slider: bool = True) -> None:
@@ -247,12 +252,15 @@ class MotionBrowserWindow(QMainWindow):
 
         frame_index = min(int(self.current_frame), self.current_clip.frame_count - 1)
         self.viewer.set_qpos(self.current_qpos_frames[frame_index])
-        self.frame_label.setText(f"Frame {frame_index + 1} / {self.current_clip.frame_count}")
+        trim_start, trim_end = self.frame_slider.trimRange()
+        trim_frame_count = trim_end - trim_start + 1
+        self.frame_label.setText(
+            f"Frame {frame_index + 1} / {self.current_clip.frame_count} | Trim {trim_start + 1} - {trim_end + 1}"
+        )
+        self.trim_label.setText(f"Trim {trim_start + 1} - {trim_end + 1} ({trim_frame_count} frames)")
 
         if update_slider:
-            self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(frame_index)
-            self.frame_slider.blockSignals(False)
 
     def _advance_playback(self) -> None:
         now = time.perf_counter()
@@ -289,10 +297,10 @@ class MotionBrowserWindow(QMainWindow):
         del item
         self._update_checked_count()
 
-    def _on_scrub_started(self) -> None:
+    def _on_slider_interaction_started(self) -> None:
         self.scrubbing = True
 
-    def _on_scrub_finished(self) -> None:
+    def _on_slider_interaction_finished(self) -> None:
         self.scrubbing = False
         self._reset_tick_clock()
 
@@ -304,3 +312,73 @@ class MotionBrowserWindow(QMainWindow):
         self._render_current_frame(update_slider=False)
         if not self.scrubbing:
             self._reset_tick_clock()
+
+    def _on_trim_changed(self, start: int, end: int) -> None:
+        del start, end
+        self._update_trim_label()
+
+    def _update_trim_label(self) -> None:
+        if self.current_clip is None:
+            self.frame_label.setText("Frame 0 / 0")
+            self.trim_label.setText("Trim 0 - 0 (0 frames)")
+            return
+
+        trim_start, trim_end = self.frame_slider.trimRange()
+        trim_frame_count = trim_end - trim_start + 1
+        current_index = min(int(self.current_frame), self.current_clip.frame_count - 1)
+        self.frame_label.setText(
+            f"Frame {current_index + 1} / {self.current_clip.frame_count} | Trim {trim_start + 1} - {trim_end + 1}"
+        )
+        self.trim_label.setText(f"Trim {trim_start + 1} - {trim_end + 1} ({trim_frame_count} frames)")
+
+    def _build_trimmed_clip(self, start_frame: int, end_frame: int) -> MotionClip:
+        if self.current_clip is None:
+            raise ValueError("No motion clip is loaded")
+
+        frame_slice = slice(start_frame, end_frame + 1)
+        return MotionClip(
+            path=self.current_clip.path,
+            display_name=self.current_clip.display_name,
+            format_name=self.current_clip.format_name,
+            framerate=self.current_clip.framerate,
+            joint_names=np.array(self.current_clip.joint_names, copy=True),
+            joint_pos=np.array(self.current_clip.joint_pos[frame_slice], copy=True),
+            base_pos_w=np.array(self.current_clip.base_pos_w[frame_slice], copy=True),
+            base_quat_w=np.array(self.current_clip.base_quat_w[frame_slice], copy=True),
+        )
+
+    def _trim_current_clip(self) -> None:
+        if self.current_clip is None:
+            QMessageBox.information(self, "No motion clip loaded", "Load a motion clip before trimming.")
+            return
+
+        trim_start, trim_end = self.frame_slider.trimRange()
+        trimmed_clip = self._build_trimmed_clip(trim_start, trim_end)
+        suggested_name = (
+            f"{self.current_clip.display_name.replace('/', '__')}_trim_{trim_start + 1}_{trim_end + 1}.npz"
+        )
+        default_path = str((self.dataset_dir / suggested_name).resolve())
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save trimmed motion clip",
+            default_path,
+            "NumPy archive (*.npz)",
+        )
+        if not destination:
+            return
+
+        output_path = Path(destination)
+        if output_path.suffix.lower() != ".npz":
+            output_path = output_path.with_suffix(".npz")
+
+        try:
+            export_motion_clip_npz(trimmed_clip, output_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Trim export failed", str(exc))
+            return
+
+        QMessageBox.information(
+            self,
+            "Trim export complete",
+            f"Exported frames {trim_start + 1} - {trim_end + 1} to:\n{output_path}",
+        )
