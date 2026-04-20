@@ -43,3 +43,5 @@ pip-wheel-metadata/
 Thumbs.db
 .idea/
 .vscode/
+
+datasets/
