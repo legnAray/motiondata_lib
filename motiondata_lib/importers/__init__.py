@@ -59,7 +59,6 @@ def discover_motion_clips(dataset_dir: Path, format_hint: str = "auto") -> list[
 def load_motion_clip(
     clip_ref: MotionClipRef,
     robot_profile: "RobotProfile",
-    fps_override: float | None = None,
 ) -> MotionClip:
     importer = IMPORTER_BY_NAME[clip_ref.format_name]
-    return importer.load_motion_clip(clip_ref, robot_profile=robot_profile, fps_override=fps_override)
+    return importer.load_motion_clip(clip_ref, robot_profile=robot_profile)

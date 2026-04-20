@@ -40,7 +40,6 @@ def can_load(path: Path) -> bool:
 def load_motion_clip(
     clip_ref: MotionClipRef,
     robot_profile: "RobotProfile",
-    fps_override: float | None = None,
 ) -> MotionClip:
     joint_columns = tuple(f"{name}_dof" for name in robot_profile.joint_names)
     expected_columns = ("Frame", *ROOT_TRANSLATE_COLUMNS, *ROOT_ROTATE_COLUMNS, *joint_columns)
@@ -61,5 +60,4 @@ def load_motion_clip(
         joint_pos=np.deg2rad(data[:, 6:]),
         base_pos_w=data[:, 0:3] * 0.01,
         base_quat_w=euler_xyz_degrees_to_quat_wxyz(data[:, 3:6]),
-        fps_override=fps_override,
     )

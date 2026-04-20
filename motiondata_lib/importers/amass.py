@@ -38,7 +38,6 @@ def can_load(path: Path) -> bool:
 def load_motion_clip(
     clip_ref: MotionClipRef,
     robot_profile: "RobotProfile",
-    fps_override: float | None = None,
 ) -> MotionClip:
     expected_column_count = 7 + len(robot_profile.joint_names)
     data = np.load(clip_ref.path, allow_pickle=False)
@@ -55,5 +54,4 @@ def load_motion_clip(
         joint_pos=data[:, 7:],
         base_pos_w=base_pos_w,
         base_quat_w=quat_xyzw_to_wxyz(data[:, 3:7]),
-        fps_override=fps_override,
     )

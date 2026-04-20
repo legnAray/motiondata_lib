@@ -2,6 +2,8 @@
 
 `motiondata-lib` is a MuJoCo + PySide6 desktop tool for browsing humanoid motion datasets, previewing clips on a robot model, and exporting selected motions to a unified `.npz` format.
 
+![alt text](snapshot.png)
+
 ## Features
 
 - Browse all motion files under a dataset directory, including nested subdirectories
@@ -44,36 +46,8 @@ sudo apt install libxcb-cursor0
 
 ## Quick Start
 
-Run the browser against a dataset directory:
-
 ```bash
-uv run python main.py example_datasets/sonic
-```
-
-Select a clip in the right panel to load it. The GUI supports:
-
-- play / pause
-- frame scrubbing with the slider
-- playback speed adjustment
-- following the robot root body
-- checking multiple clips and exporting them together
-
-Exports are always written as standardized `.npz` files, with the dataset's relative directory structure preserved inside the export folder.
-
-## CLI
-
-```bash
-uv run python main.py <dataset_dir> [--robot unitree_g1] [--format auto] [--fps-override 60]
-```
-
-Useful examples:
-
-```bash
-uv run python main.py example_datasets/retargeted_npz
-uv run python main.py example_datasets/amass --format amass
-uv run python main.py example_datasets/amass --fps-override 60
-uv run python main.py example_datasets/sonic --robot unitree_g1
-uv run python main.py example_datasets/sonic --model /path/to/robot.urdf
+uv run python main.py <dataset_dir> [--robot unitree_g1] [--format auto]
 ```
 
 Command-line options:
@@ -82,7 +56,6 @@ Command-line options:
 - `--robot`: robot profile name loaded from `robots/*.toml`
 - `--model`: temporary URDF override for the selected robot profile
 - `--format`: force one of `auto`, `retargeted_npz`, `sonic`, `lafan1`, `amass`
-- `--fps-override`: replace the source frame rate for all clips in the directory
 
 ## Supported Robots
 
@@ -163,26 +136,6 @@ Importer behavior:
 - frame rate is inferred from the last integer in the filename
 - base `z` is shifted upward by `0.75`
 
-## Project Layout
-
-```text
-main.py
-motiondata_lib/
-  app.py
-  window.py
-  viewer.py
-  model.py
-  exporters.py
-  robot_profiles.py
-  importers/
-robots/
-  unitree_g1.toml
-  resources/
-example_datasets/
-README.md
-pyproject.toml
-```
-
 ## Development
 
 Use `uv` for dependency and package management in this repository. Prefer:
@@ -225,7 +178,7 @@ joint_names = ["joint_a", "joint_b", "joint_c"]
 2. Define:
    - `FORMAT_NAME`
    - `can_load(path: Path) -> bool`
-   - `load_motion_clip(clip_ref, robot_profile, fps_override=None) -> MotionClip`
+   - `load_motion_clip(clip_ref, robot_profile) -> MotionClip`
 3. Register the importer in `motiondata_lib/importers/__init__.py`
 4. Convert incoming data with `build_motion_clip(...)`
 

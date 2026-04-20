@@ -29,7 +29,6 @@ def can_load(path: Path) -> bool:
 def load_motion_clip(
     clip_ref: MotionClipRef,
     robot_profile: "RobotProfile",
-    fps_override: float | None = None,
 ) -> MotionClip:
     del robot_profile
     with np.load(clip_ref.path, allow_pickle=False) as data:
@@ -45,5 +44,4 @@ def load_motion_clip(
             joint_pos=np.asarray(data["joint_pos"], dtype=np.float64),
             base_pos_w=np.asarray(data["base_pos_w"], dtype=np.float64),
             base_quat_w=np.asarray(data["base_quat_w"], dtype=np.float64),
-            fps_override=fps_override,
         )

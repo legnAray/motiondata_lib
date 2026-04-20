@@ -40,7 +40,6 @@ class MotionBrowserWindow(QMainWindow):
         dataset_dir: Path,
         robot_profile: RobotProfile,
         dataset_format: str = "auto",
-        fps_override: float | None = None,
         model_override: Path | None = None,
     ) -> None:
         super().__init__()
@@ -48,7 +47,6 @@ class MotionBrowserWindow(QMainWindow):
         self.robot_profile = robot_profile
         self.model_path = (robot_profile.model_path if model_override is None else model_override.resolve())
         self.dataset_format = dataset_format
-        self.fps_override = fps_override
 
         self.model: mujoco.MjModel = load_model(self.robot_profile, self.model_path)
         self.viewer = MujocoViewer(self.model, self.robot_profile)
@@ -212,7 +210,7 @@ class MotionBrowserWindow(QMainWindow):
         try:
             export_dir = self._create_export_directory(destination_root)
             for clip_ref in checked_refs:
-                clip = load_motion_clip(clip_ref, self.robot_profile, fps_override=self.fps_override)
+                clip = load_motion_clip(clip_ref, self.robot_profile)
                 relative_path = clip_ref.path.relative_to(self.dataset_dir).with_suffix(".npz")
                 export_motion_clip_npz(clip, export_dir / relative_path)
         except Exception as exc:  # noqa: BLE001
@@ -226,7 +224,7 @@ class MotionBrowserWindow(QMainWindow):
         )
 
     def _load_clip(self, clip_ref: MotionClipRef) -> None:
-        clip = load_motion_clip(clip_ref, self.robot_profile, fps_override=self.fps_override)
+        clip = load_motion_clip(clip_ref, self.robot_profile)
         self.current_clip = clip
         self.current_qpos_frames = build_qpos_frames(clip, self.model)
         self.current_frame = 0.0

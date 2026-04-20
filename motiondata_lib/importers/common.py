@@ -47,11 +47,7 @@ def build_motion_clip(
     joint_pos: np.ndarray,
     base_pos_w: np.ndarray,
     base_quat_w: np.ndarray,
-    fps_override: float | None = None,
 ) -> MotionClip:
-    if fps_override is not None:
-        framerate = fps_override
-
     joint_names = np.asarray(joint_names)
     joint_pos = np.asarray(joint_pos, dtype=np.float64)
     base_pos_w = np.asarray(base_pos_w, dtype=np.float64)

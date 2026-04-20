@@ -44,11 +44,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="Dataset format override. Defaults to auto-detect.",
     )
-    parser.add_argument(
-        "--fps-override",
-        type=float,
-        help="Override the source frame rate for every clip in the input directory.",
-    )
     return parser.parse_args(argv)
 
 
@@ -71,7 +66,6 @@ def main(argv: list[str] | None = None) -> int:
             dataset_dir,
             robot_profile,
             dataset_format=args.format,
-            fps_override=args.fps_override,
             model_override=model_path,
         )
     except Exception as exc:  # noqa: BLE001
