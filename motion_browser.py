@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+import shutil
 import sys
 import tempfile
 import time
@@ -16,6 +18,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QFileDialog,
     QMessageBox,
     QPushButton,
     QSlider,
@@ -34,6 +38,7 @@ from PySide6.QtWidgets import (
 DEFAULT_MODEL_PATH = Path("resources/unitree_g1/g1_29dof.urdf")
 REQUIRED_KEYS = {"framerate", "joint_names", "joint_pos", "base_pos_w", "base_quat_w"}
 RIGHT_PANEL_WIDTH = 420
+ROOT_BODY_NAME = "pelvis"
 
 
 @dataclass(frozen=True)
@@ -217,6 +222,9 @@ class MujocoViewer(QOpenGLWidget):
         self.model = model
         self.data = mujoco.MjData(model)
         self.current_qpos = np.array(model.qpos0, copy=True)
+        root_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ROOT_BODY_NAME)
+        self.root_body_id = root_body_id if root_body_id != -1 else None
+        self.follow_root = True
 
         self.camera = mujoco.MjvCamera()
         self.option = mujoco.MjvOption()
@@ -238,13 +246,19 @@ class MujocoViewer(QOpenGLWidget):
         self.scene = mujoco.MjvScene(self.model, maxgeom=20000)
         self.context = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
 
+    def _sync_data(self) -> None:
+        self.data.qpos[:] = self.current_qpos
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
+        if self.follow_root and self.root_body_id is not None:
+            self.camera.lookat[:] = self.data.xpos[self.root_body_id]
+
     def paintGL(self) -> None:
         if self.scene is None or self.context is None:
             return
 
-        self.data.qpos[:] = self.current_qpos
-        self.data.qvel[:] = 0.0
-        mujoco.mj_forward(self.model, self.data)
+        self._sync_data()
         mujoco.mjv_updateScene(
             self.model,
             self.data,
@@ -261,6 +275,15 @@ class MujocoViewer(QOpenGLWidget):
 
     def set_qpos(self, qpos: np.ndarray) -> None:
         self.current_qpos[:] = qpos
+        self._sync_data()
+        if self.follow_root:
+            self.update()
+            return
+        self.update()
+
+    def set_follow_root(self, enabled: bool) -> None:
+        self.follow_root = enabled
+        self._sync_data()
         self.update()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
@@ -329,11 +352,14 @@ class MotionBrowserWindow(QMainWindow):
 
         self.list_widget = QListWidget()
         self.clip_count_label = QLabel(f"{len(self.clips)} motion files")
+        self.checked_count_label = QLabel("0 checked")
         self.dataset_field = QLineEdit(str(self.dataset_dir))
         self.current_clip_field = QLineEdit("No clip loaded")
         self.frame_label = QLabel("Frame 0 / 0")
 
         self.play_button = QPushButton("Pause")
+        self.export_button = QPushButton("Export checked")
+        self.follow_root_checkbox = QCheckBox("Follow root")
         self.speed_spin = QDoubleSpinBox()
         self.frame_slider = QSlider(Qt.Horizontal)
 
@@ -372,6 +398,13 @@ class MotionBrowserWindow(QMainWindow):
         self.current_clip_field.setReadOnly(True)
         self.current_clip_field.setCursorPosition(0)
 
+        self.export_button.setEnabled(False)
+
+        self.follow_root_checkbox.setChecked(True)
+        self.follow_root_checkbox.setEnabled(self.viewer.root_body_id is not None)
+        if self.viewer.root_body_id is None:
+            self.follow_root_checkbox.setToolTip(f"Body '{ROOT_BODY_NAME}' was not found in the loaded model")
+
         right_panel = QWidget()
         right_panel.setFixedWidth(RIGHT_PANEL_WIDTH)
         right_layout = QVBoxLayout(right_panel)
@@ -382,6 +415,7 @@ class MotionBrowserWindow(QMainWindow):
 
         controls_row = QHBoxLayout()
         controls_row.addWidget(self.play_button)
+        controls_row.addWidget(self.follow_root_checkbox)
         controls_row.addStretch(1)
         controls_row.addWidget(QLabel("Speed"))
         controls_row.addWidget(self.speed_spin)
@@ -389,8 +423,10 @@ class MotionBrowserWindow(QMainWindow):
         right_layout.addWidget(title_label)
         right_layout.addWidget(self.dataset_field)
         right_layout.addWidget(self.clip_count_label)
+        right_layout.addWidget(self.checked_count_label)
         right_layout.addWidget(self.list_widget, stretch=1)
         right_layout.addWidget(self.current_clip_field)
+        right_layout.addWidget(self.export_button)
         right_layout.addLayout(controls_row)
         right_layout.addWidget(self.frame_slider)
         right_layout.addWidget(self.frame_label)
@@ -405,7 +441,10 @@ class MotionBrowserWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.list_widget.currentItemChanged.connect(self._on_clip_selected)
+        self.list_widget.itemChanged.connect(self._on_item_changed)
         self.play_button.clicked.connect(self._toggle_playback)
+        self.export_button.clicked.connect(self._export_checked_clips)
+        self.follow_root_checkbox.toggled.connect(self.viewer.set_follow_root)
         self.speed_spin.valueChanged.connect(self._reset_tick_clock)
         self.frame_slider.sliderPressed.connect(self._on_scrub_started)
         self.frame_slider.sliderReleased.connect(self._on_scrub_finished)
@@ -414,8 +453,64 @@ class MotionBrowserWindow(QMainWindow):
     def _populate_clip_list(self) -> None:
         for clip_ref in self.clips:
             item = QListWidgetItem(clip_ref.display_name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, clip_ref)
             self.list_widget.addItem(item)
+        self._update_checked_count()
+
+    def _checked_clip_refs(self) -> list[MotionClipRef]:
+        checked_refs: list[MotionClipRef] = []
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            if item.checkState() == Qt.Checked:
+                checked_refs.append(item.data(Qt.UserRole))
+        return checked_refs
+
+    def _update_checked_count(self) -> None:
+        checked_count = len(self._checked_clip_refs())
+        self.checked_count_label.setText(f"{checked_count} checked")
+        self.export_button.setEnabled(checked_count > 0)
+
+    def _create_export_directory(self, destination_root: Path) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"{self.dataset_dir.name}_export_{timestamp}"
+        export_dir = destination_root / base_name
+        suffix = 1
+        while export_dir.exists():
+            export_dir = destination_root / f"{base_name}_{suffix}"
+            suffix += 1
+        export_dir.mkdir(parents=True, exist_ok=False)
+        return export_dir
+
+    def _export_checked_clips(self) -> None:
+        checked_refs = self._checked_clip_refs()
+        if not checked_refs:
+            QMessageBox.information(self, "No motion files selected", "Check one or more motion files before exporting.")
+            return
+
+        destination = QFileDialog.getExistingDirectory(self, "Select export destination", str(self.dataset_dir.parent))
+        if not destination:
+            return
+
+        destination_root = Path(destination)
+
+        try:
+            export_dir = self._create_export_directory(destination_root)
+            for clip_ref in checked_refs:
+                relative_path = clip_ref.path.relative_to(self.dataset_dir)
+                target_path = export_dir / relative_path
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(clip_ref.path, target_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {len(checked_refs)} motion files to:\n{export_dir}",
+        )
 
     def _load_clip(self, clip_ref: MotionClipRef) -> None:
         clip = load_motion_clip(clip_ref, self.model)
@@ -477,6 +572,10 @@ class MotionBrowserWindow(QMainWindow):
             self._load_clip(clip_ref)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Failed to load motion clip", str(exc))
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        del item
+        self._update_checked_count()
 
     def _on_scrub_started(self) -> None:
         self.scrubbing = True
