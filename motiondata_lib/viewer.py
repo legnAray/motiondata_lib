@@ -5,17 +5,19 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
-from motiondata_lib.constants import ROOT_BODY_NAME
+from motiondata_lib.robot_profiles import RobotProfile
+from motiondata_lib.viewer_defaults import DEFAULT_CAMERA_PRESET
 
 
 class MujocoViewer(QOpenGLWidget):
-    def __init__(self, model: mujoco.MjModel, parent=None) -> None:
+    def __init__(self, model: mujoco.MjModel, robot_profile: RobotProfile, parent=None) -> None:
         super().__init__(parent)
         self.model = model
+        self.robot_profile = robot_profile
         self.data = mujoco.MjData(model)
         self.current_qpos = np.array(model.qpos0, copy=True)
 
-        root_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ROOT_BODY_NAME)
+        root_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, robot_profile.root_body)
         self.root_body_id = root_body_id if root_body_id != -1 else None
         self.follow_root = True
 
@@ -23,10 +25,10 @@ class MujocoViewer(QOpenGLWidget):
         self.option = mujoco.MjvOption()
         mujoco.mjv_defaultFreeCamera(model, self.camera)
         mujoco.mjv_defaultOption(self.option)
-        self.camera.distance = 3.0
-        self.camera.azimuth = 145.0
-        self.camera.elevation = -20.0
-        self.camera.lookat[:] = (0.0, 0.0, 0.9)
+        self.camera.distance = DEFAULT_CAMERA_PRESET.distance
+        self.camera.azimuth = DEFAULT_CAMERA_PRESET.azimuth
+        self.camera.elevation = DEFAULT_CAMERA_PRESET.elevation
+        self.camera.lookat[:] = DEFAULT_CAMERA_PRESET.lookat
 
         self.scene: mujoco.MjvScene | None = None
         self.context: mujoco.MjrContext | None = None

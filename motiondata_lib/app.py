@@ -7,8 +7,8 @@ import sys
 from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from motiondata_lib.constants import DEFAULT_MODEL_PATH
 from motiondata_lib.importers import SUPPORTED_DATASET_FORMATS
+from motiondata_lib.robot_profiles import DEFAULT_ROBOT_NAME, available_robot_names, load_robot_profile
 from motiondata_lib.window import MotionBrowserWindow
 
 
@@ -24,13 +24,19 @@ def configure_opengl() -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    robot_names = available_robot_names()
     parser = argparse.ArgumentParser(description="Browse motion clips in a simple MuJoCo GUI.")
     parser.add_argument("dataset", type=Path, help="Directory containing motion clips in one supported format")
     parser.add_argument(
+        "--robot",
+        choices=robot_names,
+        default=DEFAULT_ROBOT_NAME,
+        help=f"Robot profile to load (default: {DEFAULT_ROBOT_NAME})",
+    )
+    parser.add_argument(
         "--model",
         type=Path,
-        default=DEFAULT_MODEL_PATH,
-        help=f"URDF model to load (default: {DEFAULT_MODEL_PATH})",
+        help="Optional URDF override. Defaults to the model path defined by the selected robot profile.",
     )
     parser.add_argument(
         "--format",
@@ -49,7 +55,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     dataset_dir = args.dataset.resolve()
-    model_path = args.model.resolve()
+    robot_profile = load_robot_profile(args.robot)
+    model_path = robot_profile.model_path if args.model is None else args.model.resolve()
 
     if not dataset_dir.is_dir():
         raise SystemExit(f"Dataset directory does not exist: {dataset_dir}")
@@ -62,9 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         window = MotionBrowserWindow(
             dataset_dir,
-            model_path,
+            robot_profile,
             dataset_format=args.format,
             fps_override=args.fps_override,
+            model_override=model_path,
         )
     except Exception as exc:  # noqa: BLE001
         QMessageBox.critical(None, "Failed to start motion browser", str(exc))

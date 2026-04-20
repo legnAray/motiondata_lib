@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from motiondata_lib.importers.common import build_motion_clip
 from motiondata_lib.types import MotionClip, MotionClipRef
+
+if TYPE_CHECKING:
+    from motiondata_lib.robot_profiles import RobotProfile
 
 
 FORMAT_NAME = "retargeted_npz"
@@ -22,7 +26,12 @@ def can_load(path: Path) -> bool:
         return False
 
 
-def load_motion_clip(clip_ref: MotionClipRef, fps_override: float | None = None) -> MotionClip:
+def load_motion_clip(
+    clip_ref: MotionClipRef,
+    robot_profile: "RobotProfile",
+    fps_override: float | None = None,
+) -> MotionClip:
+    del robot_profile
     with np.load(clip_ref.path, allow_pickle=False) as data:
         missing = STANDARD_NPZ_KEYS.difference(data.files)
         if missing:

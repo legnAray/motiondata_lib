@@ -7,10 +7,12 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from motiondata_lib.robot_profiles import RobotProfile
 from motiondata_lib.types import MotionClip
+from motiondata_lib.viewer_defaults import DEFAULT_SCENE_PRESET
 
 
-def prepare_runtime_urdf(urdf_path: Path) -> Path:
+def prepare_runtime_urdf(urdf_path: Path, root_body: str) -> Path:
     tree = ET.parse(urdf_path)
     root = tree.getroot()
 
@@ -24,17 +26,20 @@ def prepare_runtime_urdf(urdf_path: Path) -> Path:
     if root.find("./link[@name='world']") is None:
         root.insert(0, ET.Element("link", {"name": "world"}))
 
+    if root.find(f"./link[@name='{root_body}']") is None:
+        raise ValueError(f"Body '{root_body}' does not exist in {urdf_path}")
+
     if root.find("./joint[@name='floating_base_joint']") is None:
         floating_joint = ET.Element("joint", {"name": "floating_base_joint", "type": "floating"})
         ET.SubElement(floating_joint, "parent", {"link": "world"})
-        ET.SubElement(floating_joint, "child", {"link": "pelvis"})
+        ET.SubElement(floating_joint, "child", {"link": root_body})
         root.insert(1, floating_joint)
 
     ET.indent(tree)
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".urdf",
-        prefix="g1_runtime_",
+        prefix=f"{urdf_path.stem}_runtime_",
         dir=urdf_path.parent,
         delete=False,
     ) as handle:
@@ -43,6 +48,7 @@ def prepare_runtime_urdf(urdf_path: Path) -> Path:
 
 
 def apply_default_viewer_scene(spec: mujoco.MjSpec) -> None:
+    scene = DEFAULT_SCENE_PRESET
     spec.visual.headlight.active = 1
     spec.visual.headlight.ambient = [0.25, 0.25, 0.25]
     spec.visual.headlight.diffuse = [0.85, 0.85, 0.85]
@@ -52,8 +58,8 @@ def apply_default_viewer_scene(spec: mujoco.MjSpec) -> None:
     skybox.name = "viewer_skybox"
     skybox.type = mujoco.mjtTexture.mjTEXTURE_SKYBOX
     skybox.builtin = mujoco.mjtBuiltin.mjBUILTIN_GRADIENT
-    skybox.rgb1 = [0.18, 0.35, 0.55]
-    skybox.rgb2 = [0.0, 0.0, 0.0]
+    skybox.rgb1 = list(scene.skybox_rgb1)
+    skybox.rgb2 = list(scene.skybox_rgb2)
     skybox.width = 512
     skybox.height = 3072
 
@@ -61,8 +67,8 @@ def apply_default_viewer_scene(spec: mujoco.MjSpec) -> None:
     floor_texture.name = "viewer_floor_texture"
     floor_texture.type = mujoco.mjtTexture.mjTEXTURE_2D
     floor_texture.builtin = mujoco.mjtBuiltin.mjBUILTIN_CHECKER
-    floor_texture.rgb1 = [0.10, 0.20, 0.34]
-    floor_texture.rgb2 = [0.18, 0.32, 0.52]
+    floor_texture.rgb1 = list(scene.floor_rgb1)
+    floor_texture.rgb2 = list(scene.floor_rgb2)
     floor_texture.width = 512
     floor_texture.height = 512
 
@@ -87,16 +93,17 @@ def apply_default_viewer_scene(spec: mujoco.MjSpec) -> None:
 
     light = spec.worldbody.add_light()
     light.name = "viewer_key_light"
-    light.pos = [0.0, 0.0, 4.5]
-    light.dir = [0.0, 0.0, -1.0]
+    light.pos = list(scene.light_pos)
+    light.dir = list(scene.light_dir)
     light.ambient = [0.15, 0.15, 0.15]
     light.diffuse = [0.85, 0.85, 0.85]
     light.specular = [0.20, 0.20, 0.20]
     light.castshadow = True
 
 
-def load_model(urdf_path: Path) -> mujoco.MjModel:
-    runtime_urdf = prepare_runtime_urdf(urdf_path)
+def load_model(robot_profile: RobotProfile, model_path: Path | None = None) -> mujoco.MjModel:
+    urdf_path = robot_profile.model_path if model_path is None else model_path.resolve()
+    runtime_urdf = prepare_runtime_urdf(urdf_path, robot_profile.root_body)
     try:
         spec = mujoco.MjSpec.from_file(str(runtime_urdf))
         apply_default_viewer_scene(spec)

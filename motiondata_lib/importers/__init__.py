@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from motiondata_lib.importers import amass, lafan1, retargeted_npz, sonic
 from motiondata_lib.importers.common import motion_files_under_dir
 from motiondata_lib.types import MotionClip, MotionClipRef
+
+if TYPE_CHECKING:
+    from motiondata_lib.robot_profiles import RobotProfile
 
 
 IMPORTERS = (retargeted_npz, sonic, lafan1, amass)
@@ -52,6 +56,10 @@ def discover_motion_clips(dataset_dir: Path, format_hint: str = "auto") -> list[
     return clips
 
 
-def load_motion_clip(clip_ref: MotionClipRef, fps_override: float | None = None) -> MotionClip:
+def load_motion_clip(
+    clip_ref: MotionClipRef,
+    robot_profile: "RobotProfile",
+    fps_override: float | None = None,
+) -> MotionClip:
     importer = IMPORTER_BY_NAME[clip_ref.format_name]
-    return importer.load_motion_clip(clip_ref, fps_override=fps_override)
+    return importer.load_motion_clip(clip_ref, robot_profile=robot_profile, fps_override=fps_override)
