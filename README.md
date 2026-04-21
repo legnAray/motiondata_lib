@@ -7,6 +7,7 @@
 ## Features
 
 - Browse all motion files under a dataset directory, including nested subdirectories
+- Filter the motion list by filename from the right-side panel
 - Auto-detect supported dataset formats when a directory contains only one format
 - Preview clips on a MuJoCo robot model with mouse camera control
 - Play, pause, scrub frames, adjust playback speed, and optionally follow the root body
@@ -51,7 +52,7 @@ sudo apt install libxcb-cursor0
 uv run python main.py <dataset_dir> [--robot unitree_g1] [--format auto]
 ```
 
-After launching, the GUI lets you select a clip, move the current frame, drag trim markers on the timeline, and export either checked clips or the trimmed span of the current clip.
+After launching, the GUI lets you filter motions by name, select a clip, move the current frame, drag trim markers on the timeline, and export either checked clips or the trimmed span of the current clip.
 
 Command-line options:
 

@@ -1,30 +1,21 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is currently a small Python 3.11 project with a root-level entrypoint in `main.py`. Project metadata and dependencies live in `pyproject.toml`, and `README.md` should hold user-facing usage notes. The local virtual environment is `.venv/`; treat it as machine-specific and do not commit changes from it.
-
-If the codebase grows, move reusable logic into a package directory such as `motiondata_lib/` and mirror it with tests under `tests/`. Keep modules focused and group related motion-processing code together instead of expanding `main.py` into a catch-all script.
+The app entrypoint is `main.py`, which launches the desktop browser through `motiondata_lib/app.py`. Core GUI and runtime code lives under `motiondata_lib/`: `window.py` wires the interface, `viewer.py` and `model.py` handle MuJoCo rendering, `trim_slider.py` provides timeline trimming, and `exporters.py` writes standardized `.npz` clips. Dataset adapters live in `motiondata_lib/importers/`, while robot definitions live in `robots/*.toml` with matching URDF assets under `robots/resources/`. Use `example_datasets/` for smoke tests and format references.
 
 ## Build, Test, and Development Commands
-- Use `uv` for Python dependency management and execution so environments stay reproducible across machines. For example, install packages with `uv add <package>` instead of `pip install <package>`.
-- `uv sync` - create or refresh the local environment from `pyproject.toml`.
-- `uv run python main.py` - run the current smoke test for the app entrypoint.
-- `uv run python -m compileall .` - perform a fast syntax check across the repo.
-- `uv run python -m pytest` - run tests after adding `pytest` and a `tests/` directory.
+- `uv sync` — create or refresh the local environment from `pyproject.toml`.
+- `uv run python main.py example_datasets/sonic` — launch the browser with a known sample dataset.
+- `uv run python main.py --help` — verify CLI options after changing startup or robot-loading behavior.
+- `uv run python -m py_compile main.py motiondata_lib/*.py motiondata_lib/importers/*.py` — fast syntax check for the app and importers.
 
-There is no package build step configured yet, so validation is currently run-focused rather than artifact-focused.
+On Ubuntu, install `libxcb-cursor0` before running the GUI. Use `uv add <package>` for new Python dependencies; do not use `pip install` directly in this repo.
 
 ## Coding Style & Naming Conventions
-Follow PEP 8 with 4-space indentation. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_CASE` for constants. Keep functions small, prefer standard-library solutions first, and add type hints when introducing reusable helpers or public APIs.
-
-No formatter or linter is configured yet, so keep imports tidy and formatting consistent with the existing simple style.
+Follow PEP 8 with 4-space indentation and explicit type hints on public helpers. Use `snake_case` for modules/functions, `PascalCase` for classes, and `UPPER_CASE` for constants. Keep format-specific parsing inside importer modules rather than growing `window.py` or `app.py`. New robot-specific assumptions belong in `robots/*.toml`, not hardcoded in runtime code.
 
 ## Testing Guidelines
-There is no committed automated test suite yet. Add new tests under `tests/` using names like `test_parser.py` or `test_main.py`. Favor small unit tests for data transforms and one smoke test for command-line behavior when `main.py` changes.
-
-When adding nontrivial logic, include enough tests to cover new branches and failure cases.
+There is no committed `pytest` suite yet, so rely on targeted smoke tests. Validate importer changes with a sample directory from `example_datasets/`, and validate GUI changes with startup checks plus a quick manual pass on playback, trim, and export behavior. When adding nontrivial parsing or transforms, prefer small unit tests under a future `tests/` directory.
 
 ## Commit & Pull Request Guidelines
-This repository has no shared commit history yet, so start with clear, imperative commit messages such as `feat: add frame timestamp parser` or `fix: handle empty motion sample`.
-
-Pull requests should stay narrow and include: a short summary, linked issue or task when available, the commands used to validate the change, and sample output for behavior changes. Update `README.md` when setup or runtime behavior changes.
+Recent history uses short imperative messages such as `feat: add motion trim`, `update readme`, and `refactor codebase`. Prefer concise subject lines with a verb-first summary; use a `feat:` or `fix:` prefix when it adds clarity. Pull requests should include the user-visible behavior change, the validation commands you ran, and updated docs when CLI, formats, or setup steps change.
