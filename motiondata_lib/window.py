@@ -79,6 +79,7 @@ class MotionBrowserWindow(QMainWindow):
         self.play_button = QPushButton("Pause")
         self.export_button = QPushButton("Export checked")
         self.trim_button = QPushButton("Trim current")
+        self.select_all_checkbox = QCheckBox("Select all")
         self.follow_root_checkbox = QCheckBox("Follow root")
         self.speed_spin = QDoubleSpinBox()
         self.frame_slider = TrimSlider()
@@ -154,6 +155,7 @@ class MotionBrowserWindow(QMainWindow):
         library_stats_row.setSpacing(10)
         library_stats_row.addWidget(self.clip_count_label)
         library_stats_row.addStretch(1)
+        library_stats_row.addWidget(self.select_all_checkbox)
         library_stats_row.addWidget(self.checked_count_label)
 
         timeline_status_row = QHBoxLayout()
@@ -205,6 +207,7 @@ class MotionBrowserWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.list_widget.currentItemChanged.connect(self._on_clip_selected)
         self.list_widget.itemChanged.connect(self._on_item_changed)
+        self.select_all_checkbox.toggled.connect(self._toggle_all_clips)
         self.filter_field.textChanged.connect(self._apply_clip_filter)
         self.play_button.clicked.connect(self._toggle_playback)
         self.export_button.clicked.connect(self._export_checked_clips)
@@ -239,7 +242,32 @@ class MotionBrowserWindow(QMainWindow):
         checked_count = len(self._checked_clip_refs())
         self.checked_count_label.setText(f"{checked_count} checked")
         self.export_button.setEnabled(checked_count > 0)
+        self._sync_select_all_checkbox(checked_count)
         self._update_clip_count_label()
+
+    def _toggle_all_clips(self, checked: bool) -> None:
+        target_state = Qt.Checked if checked else Qt.Unchecked
+        was_blocked = self.list_widget.blockSignals(True)
+        try:
+            for index in range(self.list_widget.count()):
+                item = self.list_widget.item(index)
+                if item.checkState() == target_state:
+                    continue
+                item.setCheckState(target_state)
+                self._refresh_item_visual(item)
+        finally:
+            self.list_widget.blockSignals(was_blocked)
+
+        self._update_checked_count()
+
+    def _sync_select_all_checkbox(self, checked_count: int) -> None:
+        total_count = self.list_widget.count()
+        all_checked = total_count > 0 and checked_count == total_count
+        was_blocked = self.select_all_checkbox.blockSignals(True)
+        try:
+            self.select_all_checkbox.setChecked(all_checked)
+        finally:
+            self.select_all_checkbox.blockSignals(was_blocked)
 
     def _create_export_directory(self, destination_root: Path) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
